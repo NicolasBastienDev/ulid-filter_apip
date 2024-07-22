@@ -1,0 +1,107 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Filter;
+
+use ApiPlatform\Doctrine\Orm\Filter\AbstractFilter;
+use ApiPlatform\Doctrine\Orm\Util\QueryNameGeneratorInterface;
+use ApiPlatform\Metadata\Operation;
+use Doctrine\ORM\QueryBuilder;
+use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
+use Symfony\Component\Uid\Ulid;
+use Throwable;
+
+use function array_map;
+use function is_array;
+use function sprintf;
+use function str_ends_with;
+use function Symfony\Component\String\u;
+
+final class UlidFilter extends AbstractFilter
+{
+    protected function filterProperty(
+        string $property,
+        mixed $value,
+        QueryBuilder $queryBuilder,
+        QueryNameGeneratorInterface $queryNameGenerator,
+        string $resourceClass,
+        Operation $operation = null,
+        array $context = [],
+    ): void {
+        if (
+            null === $value
+            || !$this->isPropertyEnabled($property, $resourceClass)
+            || !$this->isPropertyMapped($property, $resourceClass, true)
+        ) {
+            return;
+        }
+
+        $alias = $queryBuilder->getRootAliases()[0];
+        $valueParameter = ':' . $queryNameGenerator->generateParameterName($property);
+        $aliasedField = sprintf('%s.%s', $alias, $property);
+
+        if (is_array($value)) {
+            $values = array_map(
+                fn (string $value) => $this->convertUlidFromStringToBinary($property, $value),
+                $value
+            );
+
+            $queryBuilder
+                ->andWhere($queryBuilder->expr()->in($aliasedField, $valueParameter))
+                ->setParameter($valueParameter, $values);
+
+            return;
+        }
+
+        $value = $this->convertUlidFromStringToBinary($property, $value);
+
+        $queryBuilder
+            ->andWhere($queryBuilder->expr()->eq($aliasedField, $valueParameter))
+            ->setParameter($valueParameter, $value);
+    }
+
+    private function convertUlidFromStringToBinary(string $property, string $value): string
+    {
+        if ('/' === ($value[0] ?? '')) {
+            $value = (string) u($value)->afterLast('/');
+        }
+
+        try {
+            return Ulid::fromString($value)->toBinary();
+        } catch (Throwable) {
+            throw new BadRequestHttpException("`{$property}`: Unable to parse Ulid `{$value}`");
+        }
+    }
+
+    public function getDescription(string $resourceClass): array
+    {
+        if (!$this->properties) {
+            return [];
+        }
+
+        $description = [];
+
+        foreach ($this->properties as $property => $strategy) {
+            if (
+                !$this->isPropertyEnabled($property, $resourceClass)
+                || !$this->isPropertyMapped($property, $resourceClass, true)
+            ) {
+                continue;
+            }
+
+            $filterParameterNames = [$property, "{$property}[]"];
+
+            foreach ($filterParameterNames as $filterParameterName) {
+                $description[$filterParameterName] = [
+                    'property' => $property,
+                    'type' => 'string',
+                    'required' => false,
+                    'is_collection' => str_ends_with($filterParameterName, '[]'),
+                ];
+            }
+        }
+
+        return $description;
+    }
+}
